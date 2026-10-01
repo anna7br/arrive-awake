@@ -62,7 +62,7 @@ npx wrangler secret put VAPID_SUBJECT
 npx wrangler deploy
 ```
 
-Paste the resulting `https://arrive-awake-oebb-proxy.<you>.workers.dev` URL into the app (Live data for Austria). The "Server alarm" option then becomes available. Optionally set `ALLOWED_ORIGIN` in `wrangler.toml` to `https://anna7br.github.io`.
+The app ships with the deployed backend URL as default (`DEFAULT_PROXY` in `index.html`, currently `https://arrive-awake-oebb-proxy.arrive-awake-oebb-proxy.workers.dev`); a different URL can be entered under "Live data for Austria". The "Server alarm" option is available whenever a backend URL is set. Optionally set `ALLOWED_ORIGIN` in `wrangler.toml` to `https://anna7br.github.io`.
 
 Without the backend the app still works with Transitous live data and GPS, but only in the foreground.
 

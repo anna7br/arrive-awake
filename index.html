@@ -377,7 +377,8 @@ function escapeHtml(s){ return String(s??'').replace(/[&<>"']/g, c=>({'&':'&amp;
 function distKm(a,b){ if(![a?.lat,a?.lon,b?.lat,b?.lon].every(Number.isFinite)) return Infinity; const R=6371, dLat=(b.lat-a.lat)*Math.PI/180, dLon=(b.lon-a.lon)*Math.PI/180, x=dLon*Math.cos((a.lat+b.lat)/2*Math.PI/180); return R*Math.hypot(dLat,x); }
 
 /* ---------- optional ÖBB live proxy (see proxy/worker.js) ---------- */
-let proxyUrl = (()=>{ try{ return localStorage.getItem('aa.proxy')||''; }catch(e){ return ''; } })();
+const DEFAULT_PROXY = 'https://arrive-awake-oebb-proxy.arrive-awake-oebb-proxy.workers.dev';   // the deployed backend (proxy/worker.js); can be changed under "Live data for Austria"
+let proxyUrl = (()=>{ try{ const v=localStorage.getItem('aa.proxy'); return v===null ? DEFAULT_PROXY : v; }catch(e){ return DEFAULT_PROXY; } })();
 async function proxyApi(path, params, method='GET', body){
   const u = new URL(proxyUrl.replace(/\/+$/,'') + '/' + path); Object.entries(params||{}).forEach(([k,v])=> v!==undefined && v!==null && u.searchParams.set(k, v));
   const r = await fetch(u, body ? {method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)} : {method}); const d = await r.json().catch(()=>null);

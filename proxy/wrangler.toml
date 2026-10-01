@@ -10,7 +10,7 @@ crons = ["* * * * *"]
 # and paste the printed id below.
 [[kv_namespaces]]
 binding = "ALARMS"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "59ea1a4698fc4d61a7de6bcc6c46ca7e"
 
 # Secrets (not in this file):  npx wrangler secret put VAPID_PRIVATE_KEY / VAPID_PUBLIC_KEY / VAPID_SUBJECT
 # Generate keys with:  npm run keys -- mailto:you@example.com
