@@ -33,7 +33,7 @@ const TZ = 'Europe/Vienna';
 const AUTH = { type: 'AID', aid: 'OWDL4fE4ixNiPBBm' };
 const CLIENT = { id: 'OEBB', type: 'IPH', name: 'oebbPROD-ADHOC', v: '6030600' };
 const TRANSITOUS = 'https://api.transitous.org/api/v1/';
-const UA = 'arrive-awake (+https://github.com/anna7br/arrive-awake)';
+const UA = 'arrive-awake (+https://github.com/anna7br/side-quests)';
 
 /* ====================== ÖBB HAFAS ====================== */
 async function mgate(meth, req) {
@@ -169,40 +169,47 @@ async function sendPush(env, alarm, kind, ev) {
   return 'sent';
 }
 
-/* ====================== alarm store & cron ====================== */
+/* ====================== alarm store & cron ======================
+ * KV on the Workers free plan allows 1000 writes, 1000 lists and 100k reads per day, so the cron must be frugal:
+ * alarms are tracked in one index key (read, never listed), evaluation results are not written back every minute
+ * (only pushes, snoozes and the ÖBB match are persisted), and far-away alarms are evaluated only every 10 minutes. */
 const key = id => 'alarm:' + id;
+const INDEX = 'alarms:index';
 const ttlFor = a => Math.max(600, Math.round((new Date(a.scheduledArrival).getTime() + 8 * 3600e3 - Date.now()) / 1000));
-async function runAlarms(env) {
+const readIndex = async env => (await env.ALARMS.get(INDEX, 'json')) || [];
+const writeIndex = (env, ids) => env.ALARMS.put(INDEX, JSON.stringify(ids), { expirationTtl: 60 * 86400 });
+async function addToIndex(env, id) { const ids = await readIndex(env); if (!ids.includes(id)) await writeIndex(env, [...ids, id]); }
+async function removeAlarm(env, id) { await env.ALARMS.delete(key(id)); const ids = await readIndex(env); if (ids.includes(id)) await writeIndex(env, ids.filter(x => x !== id)); }
+async function runAlarms(env, force = false) {
   if (!env.ALARMS) return { error: 'KV not configured' };
-  const list = await env.ALARMS.list({ prefix: 'alarm:' });
-  const out = [];
-  await Promise.all(list.keys.map(async k => {
-    const a = await env.ALARMS.get(k.name, 'json'); if (!a) return;
-    const now = Date.now(); const log = { id: a.id };
+  const ids = await readIndex(env);
+  const out = []; const gone = [];
+  await Promise.all(ids.map(async id => {
+    const a = await env.ALARMS.get(key(id), 'json'); if (!a) { gone.push(id); return; }
+    const now = Date.now(); const log = { id };
     const schedMs = new Date(a.scheduledArrival).getTime();
-    if (now > schedMs + 6 * 3600e3) { await env.ALARMS.delete(k.name); log.deleted = 'expired'; out.push(log); return; }
-    // evaluate every minute inside the last 3 h before the (last known) alarm time, else every 10 min
-    const prevEta = a.last?.eta ? new Date(a.last.eta).getTime() : schedMs;
-    const horizon = prevEta - a.lead * 60e3 - now;
-    const interval = horizon > 3 * 3600e3 ? 10 * 60e3 : 55e3;
-    if (!a.last || now - (a.last.at || 0) >= interval) {
-      try { a.last = await evaluate(a); a.lastError = null; } catch (e) { a.lastError = String(e.message || e); if (a.last) a.last.at = now; }
-    }
-    const etaMs = a.last?.eta ? new Date(a.last.eta).getTime() : schedMs;
+    if (now > schedMs + 6 * 3600e3) { await env.ALARMS.delete(key(id)); gone.push(id); log.deleted = 'expired'; out.push(log); return; }
+    // every minute inside the last 3 h before the scheduled alarm time (or once pushing started), else only every 10 min
+    const near = now >= schedMs - a.lead * 60e3 - 3 * 3600e3 || (a.pushCount || 0) > 0;
+    if (!near && !force && new Date(now).getUTCMinutes() % 10 !== 0) { log.skipped = true; out.push(log); return; }
+    let ev = null;
+    try { ev = await evaluate(a); } catch (e) { log.err = String(e.message || e); ev = a.last || null; }
+    const etaMs = ev?.eta ? new Date(ev.eta).getTime() : schedMs;
     const alarmAt = etaMs - a.lead * 60e3;
-    log.eta = new Date(etaMs).toISOString(); log.alarmAt = new Date(alarmAt).toISOString(); log.source = a.last?.source; log.err = a.lastError;
-    let kind = null;
-    if (a.last?.cancelled && !a.cancelPushed) { kind = 'cancel'; a.cancelPushed = true; }
+    log.eta = new Date(etaMs).toISOString(); log.alarmAt = new Date(alarmAt).toISOString(); log.source = ev?.source;
+    let kind = null, dirty = false;
+    if (ev?.cancelled && !a.cancelPushed) { kind = 'cancel'; a.cancelPushed = true; dirty = true; }
     else if (now >= alarmAt && now >= (a.snoozeUntil || 0) && (a.pushCount || 0) < 20 && now - (a.lastPush || 0) >= 50e3) kind = now >= etaMs ? 'arrived' : 'wake';
     if (kind) {
-      try { const res = await sendPush(env, a, kind, a.last); log.push = kind + ':' + res; if (res === 'gone') { await env.ALARMS.delete(k.name); out.push(log); return; } a.pushCount = (a.pushCount || 0) + 1; a.lastPush = now; }
+      try { const res = await sendPush(env, a, kind, ev); log.push = kind + ':' + res; if (res === 'gone') { await env.ALARMS.delete(key(id)); gone.push(id); out.push(log); return; } a.pushCount = (a.pushCount || 0) + 1; a.lastPush = now; a.last = ev; dirty = true; }
       catch (e) { log.push = 'error: ' + e.message; }
     }
-    if (now > etaMs + 20 * 60e3) { await env.ALARMS.delete(k.name); log.deleted = 'done'; out.push(log); return; }
-    await env.ALARMS.put(k.name, JSON.stringify(a), { expirationTtl: ttlFor(a) });
+    if (now > etaMs + 20 * 60e3) { await env.ALARMS.delete(key(id)); gone.push(id); log.deleted = 'done'; out.push(log); return; }
+    if (dirty) await env.ALARMS.put(key(id), JSON.stringify(a), { expirationTtl: ttlFor(a) });
     out.push(log);
   }));
-  return { checked: list.keys.length, alarms: out };
+  if (gone.length) await writeIndex(env, ids.filter(x => !gone.includes(x)));
+  return { checked: ids.length, alarms: out };
 }
 
 /* ====================== HTTP ====================== */
@@ -232,16 +239,17 @@ export default {
           const prev = await env.ALARMS.get(key(id), 'json');
           const a = { id, subscription: b.subscription, lead: Math.min(180, Math.max(1, +b.lead || 20)), lang: b.lang === 'de' ? 'de' : 'en', station: b.station, scheduledArrival: b.scheduledArrival, members: (b.members || []).slice(0, 8), oebb: b.oebb || null, snoozeUntil: +b.snoozeUntil || 0, createdAt: prev?.createdAt || Date.now(), pushCount: prev?.pushCount || 0, lastPush: prev?.lastPush || 0, last: prev?.last || null };
           await env.ALARMS.put(key(id), JSON.stringify(a), { expirationTtl: ttlFor(a) });
+          if (!prev) await addToIndex(env, id);
           return json({ id, ok: true }, 200, origin);
         }
         const id = p.get('id'); if (!id) return json({ error: 'id required' }, 400, origin);
         const a = await env.ALARMS.get(key(id), 'json');
-        if (request.method === 'DELETE') { await env.ALARMS.delete(key(id)); return json({ ok: true }, 200, origin); }
+        if (request.method === 'DELETE') { if (a) await removeAlarm(env, id); return json({ ok: true }, 200, origin); }
         if (!a) return json({ error: 'unknown alarm' }, 404, origin);
         if (is('/alarm/snooze')) { a.snoozeUntil = +p.get('until') || Date.now() + 5 * 60e3; a.lastPush = 0; await env.ALARMS.put(key(id), JSON.stringify(a), { expirationTtl: ttlFor(a) }); return json({ ok: true, snoozeUntil: a.snoozeUntil }, 200, origin); }
-        if (is('/alarm/test')) { let ev = a.last; try { ev = await evaluate(a); a.last = ev; await env.ALARMS.put(key(id), JSON.stringify(a), { expirationTtl: ttlFor(a) }); } catch (e) {} const res = await sendPush(env, a, 'test', ev); return json({ ok: res === 'sent', result: res, eta: ev?.eta || null }, 200, origin); }
+        if (is('/alarm/test')) { let ev = a.last; try { ev = await evaluate(a); } catch (e) {} const res = await sendPush(env, a, 'test', ev); return json({ ok: res === 'sent', result: res, eta: ev?.eta || null }, 200, origin); }
       }
-      if (is('/__cron') && env.DEV) return json(await runAlarms(env), 200, origin);
+      if (is('/__cron') && env.DEV) return json(await runAlarms(env, true), 200, origin);
       return json({ ok: true, service: 'arrive-awake backend', push: !!(env.VAPID_PUBLIC_KEY && env.ALARMS), endpoints: ['/locations?q=', '/arrivals?station=&when=&duration=', '/trip?id=', '/vapid', 'POST /alarm', 'DELETE /alarm?id=', 'POST /alarm/snooze?id=&until=', 'POST /alarm/test?id='] }, 200, origin);
     } catch (e) {
       return json({ error: String(e.message || e) }, 502, origin);

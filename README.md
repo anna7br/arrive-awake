@@ -4,7 +4,7 @@ A mobile-first web app (PWA) that wakes you a chosen number of minutes before yo
 
 English (primary) and German, auto-detected from the phone, switchable in the header.
 
-Live app: https://anna7br.github.io/arrive-awake/ (install it to the home screen).
+Live app: https://anna7br.github.io/side-quests/arrive-awake/ (install it to the home screen). Part of the [side-quests](https://github.com/anna7br/side-quests) repository.
 
 ## How it works
 
